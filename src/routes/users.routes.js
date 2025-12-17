@@ -29,6 +29,89 @@ router.get('/', async (req, res) => {
 });
 
 
+// GET /api/users/:id/is-enabled -> Verificar si un socio está habilitado (al día)
+router.get('/:id/is-enabled', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { max_debt_months } = req.query; // Máximo de meses de deuda permitidos (default: 2)
+    
+    const maxMonths = parseInt(max_debt_months) || 2;
+
+    // Obtener info del usuario
+    const [users] = await pool.query(
+      `SELECT 
+         u.id, u.first_name, u.last_name, u.dni, u.is_member, u.status,
+         c.name AS category_name
+       FROM users u
+       JOIN categories c ON u.category_id = c.id
+       WHERE u.id = ?`,
+      [id]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+
+    const user = users[0];
+
+    // Verificar si el usuario está activo
+    if (user.status !== 'activo') {
+      return res.json({
+        user_id: user.id,
+        name: `${user.first_name} ${user.last_name}`,
+        is_enabled: false,
+        reason: 'Usuario inactivo',
+        status: user.status
+      });
+    }
+
+    // Contar meses con deuda
+    const [debtInfo] = await pool.query(
+      `SELECT 
+         COUNT(*) AS pending_months,
+         COALESCE(SUM(balance), 0) AS total_debt
+       FROM payments
+       WHERE user_id = ? AND status IN ('pendiente', 'parcial', 'vencido')`,
+      [id]
+    );
+
+    const pendingMonths = debtInfo[0].pending_months || 0;
+    const totalDebt = Number(debtInfo[0].total_debt) || 0;
+    const isEnabled = pendingMonths <= maxMonths;
+
+    // Obtener detalle de cuotas pendientes
+    const [pendingPayments] = await pool.query(
+      `SELECT period_month, period_year, balance, status
+       FROM payments
+       WHERE user_id = ? AND status IN ('pendiente', 'parcial', 'vencido')
+       ORDER BY period_year ASC, period_month ASC`,
+      [id]
+    );
+
+    res.json({
+      user_id: user.id,
+      name: `${user.first_name} ${user.last_name}`,
+      dni: user.dni,
+      is_member: !!user.is_member,
+      category: user.category_name,
+      is_enabled: isEnabled,
+      reason: isEnabled 
+        ? (pendingMonths === 0 ? 'Sin deuda' : `Deuda dentro del límite (${pendingMonths}/${maxMonths} meses)`)
+        : `Deuda excede el límite permitido (${pendingMonths} meses, máximo ${maxMonths})`,
+      debt_summary: {
+        pending_months: pendingMonths,
+        total_debt: totalDebt,
+        max_allowed_months: maxMonths
+      },
+      pending_payments: pendingPayments
+    });
+  } catch (error) {
+    console.error('Error en GET /api/users/:id/is-enabled:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
 // POST /api/users -> crear usuario nuevo
 router.post('/', async (req, res) => {
   try {
